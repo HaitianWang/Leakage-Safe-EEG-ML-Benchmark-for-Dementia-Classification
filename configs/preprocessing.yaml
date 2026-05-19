@@ -1,0 +1,71 @@
+# Preprocessing configuration variants (Stage A in the staged benchmark).
+#
+# The selected reference pipeline is ``asr_ica``: ASR is applied first to
+# attenuate burst-like artifacts, then ICA removes residual ocular and
+# muscular components labelled by ICLabel with probability greater than 0.80.
+default:
+  resample_hz: 250
+  l_freq: 0.5
+  h_freq: 45.0
+  notch_freq: null            # upper cutoff <50 Hz, no notch needed
+  filter_design: "firwin"
+  reference: "average"
+  artifact_correction: "asr_ica"
+
+  ica:
+    n_components: null         # null -> data rank
+    max_iter: 1000
+    random_state: 42
+    iclabel_threshold: 0.80
+    artifact_labels: ["eye", "muscle", "heart", "line_noise", "channel_noise"]
+
+  asr:
+    burst_cutoff: 20.0
+    flatline_threshold_s: 5.0
+    channel_correlation_threshold: 0.80
+    max_bad_window_proportion: 0.25
+
+  bad_channel:
+    max_interpolated_channels: 2
+    drop_if_unusable: true
+
+filtering_only:
+  resample_hz: 250
+  l_freq: 0.5
+  h_freq: 45.0
+  notch_freq: null
+  filter_design: "firwin"
+  reference: "average"
+  artifact_correction: "filtering_only"
+
+ica_only:
+  resample_hz: 250
+  l_freq: 0.5
+  h_freq: 45.0
+  reference: "average"
+  artifact_correction: "ica_only"
+  ica:
+    n_components: null
+    max_iter: 1000
+    random_state: 42
+    iclabel_threshold: 0.80
+    artifact_labels: ["eye", "muscle", "heart", "line_noise", "channel_noise"]
+
+asr_only:
+  resample_hz: 250
+  l_freq: 0.5
+  h_freq: 45.0
+  reference: "average"
+  artifact_correction: "asr_only"
+  asr:
+    burst_cutoff: 20.0
+    flatline_threshold_s: 5.0
+    channel_correlation_threshold: 0.80
+    max_bad_window_proportion: 0.25
+
+asr_ica:
+  resample_hz: 250
+  l_freq: 0.5
+  h_freq: 45.0
+  reference: "average"
+  artifact_correction: "asr_ica"

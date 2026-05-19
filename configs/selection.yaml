@@ -1,0 +1,46 @@
+# Feature selection configuration (Stage D in the staged benchmark).
+#
+# All steps are fitted only on the training fold; no statistic estimated from
+# test subjects ever leaks into selection, scaling, or hyper-parameter tuning.
+default:
+  variance_threshold: 1.0e-6
+  correlation_threshold: 0.95
+  selector: "mutual_information"   # one of: mutual_information, l1_logistic, none
+  mutual_information:
+    candidate_k: [50, 100, 200, 400]
+    inner_cv_metric: "accuracy"
+  l1_logistic:
+    candidate_C: [0.01, 0.1, 1.0, 10.0]
+
+none:
+  variance_threshold: 1.0e-6
+  correlation_threshold: 0.95
+  selector: "none"
+
+mi_top50:
+  variance_threshold: 1.0e-6
+  correlation_threshold: 0.95
+  selector: "mutual_information"
+  mutual_information:
+    candidate_k: [50]
+
+mi_top100:
+  variance_threshold: 1.0e-6
+  correlation_threshold: 0.95
+  selector: "mutual_information"
+  mutual_information:
+    candidate_k: [100]
+
+mi_top200:
+  variance_threshold: 1.0e-6
+  correlation_threshold: 0.95
+  selector: "mutual_information"
+  mutual_information:
+    candidate_k: [200]
+
+l1_logistic:
+  variance_threshold: 1.0e-6
+  correlation_threshold: 0.95
+  selector: "l1_logistic"
+  l1_logistic:
+    candidate_C: [0.01, 0.1, 1.0, 10.0]

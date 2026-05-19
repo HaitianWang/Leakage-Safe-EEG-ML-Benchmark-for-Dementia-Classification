@@ -1,0 +1,50 @@
+# Base configuration for the EEG-BenchML pipeline.
+#
+# All defaults reflect the final selected configuration in the manuscript:
+#   - ASR + ICA preprocessing,
+#   - 250 Hz resampling, 0.5--45 Hz band-pass filter,
+#   - 10 s epochs with 50% overlap and training-only augmentation,
+#   - spectral + complexity + pairwise connectivity features,
+#   - mutual-information top-100 feature selection,
+#   - linear SVM with sigmoid calibration,
+#   - mean-probability subject-level aggregation,
+#   - leave-one-subject-out validation with an inner 5-fold GroupKFold.
+
+experiment:
+  name: "eeg_benchml_default"
+  seed: 42
+  task: "ad_cn"            # one of: ad_cn, ftd_cn, ad_ftd, three
+  output_dir: "outputs"
+
+data:
+  # BIDS-style root containing participants.tsv and per-subject EEG files.
+  # Replace with the local dataset path before running.
+  root: "data/ds_root"
+  participants_file: "participants.tsv"
+  eeg_extensions: [".set", ".edf", ".bdf", ".fif"]
+  exclude_bids_derivatives: true
+  # Diagnostic group column candidates in participants.tsv.
+  label_columns: ["Group", "diagnosis", "diagnostic", "class", "label", "condition"]
+
+defaults:
+  - _self_
+  - preprocessing: default
+  - features: default
+  - selection: default
+  - classifier: linear_svm
+
+evaluation:
+  protocol: "loso"           # leave-one-subject-out
+  inner_cv_folds: 5
+  aggregation: "mean_probability"   # or majority_voting
+  metrics:
+    - accuracy
+    - balanced_accuracy
+    - f1
+    - sensitivity
+    - specificity
+    - mcc
+    - auc
+  uncertainty:
+    bootstrap_resamples: 1000
+    confidence_level: 0.95

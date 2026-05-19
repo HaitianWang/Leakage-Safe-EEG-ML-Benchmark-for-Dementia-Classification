@@ -1,0 +1,66 @@
+# Byte-compiled / cached files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Experiment outputs (never check in result blobs)
+outputs/
+runs/
+results/
+wandb/
+mlruns/
+*.npz
+*.npy
+*.pkl
+*.joblib
+*.parquet
+
+# Local datasets (we never commit data)
+data/
+datasets/
+*.edf
+*.set
+*.fdt
+*.bdf
+*.fif
+*.vhdr
+*.vmrk
+
+# Logs
+*.log
+logs/
+
+# Coverage
+.coverage
+htmlcov/
+.tox/
+.pytest_cache/
+
+# Type checker / linter caches
+.mypy_cache/
+.ruff_cache/

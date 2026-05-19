@@ -1,0 +1,84 @@
+# Feature engineering configuration (Stage C in the staged benchmark).
+#
+# Frequency bands follow the manuscript:
+#   delta 0.5--4 Hz, theta 4--8 Hz, alpha 8--13 Hz, beta 13--30 Hz,
+#   low-gamma 30--45 Hz. The low-gamma band is retained for comparison but
+#   interpreted with caution because of muscle contamination.
+default:
+  epoch:
+    duration_s: 10.0
+    overlap: 0.5
+    reject_peak_to_peak_uv: 150.0
+    log_variance_z_threshold: 3.5
+
+  augmentation:
+    enabled: true             # training-only augmentation
+    amplitude_scaling: [0.95, 1.05]
+    gaussian_noise_sigma: 0.01
+
+  bands:
+    delta: [0.5, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 13.0]
+    beta:  [13.0, 30.0]
+    gamma_low: [30.0, 45.0]
+
+  families:                   # subset selects feature families to include
+    spectral: true
+    complexity: true
+    connectivity: true
+    graph: false              # graph descriptors are evaluated as ablation
+
+  spectral:
+    welch_window_s: 4.0
+    welch_overlap: 0.5
+    n_fft: 1024
+
+  complexity:
+    sample_entropy_m: 2
+    sample_entropy_r: 0.2
+    higuchi_kmax: 8
+    multi_scale_entropy_scales: [1, 2, 3, 4, 5]
+
+  connectivity:
+    metric: "wpli"
+    eps: 1.0e-8
+
+  graph:
+    edge_keep_proportion: 0.30
+    descriptors: ["mean_strength", "clustering", "global_efficiency", "char_path_length"]
+
+# Ablation: spectral features only.
+spectral_only:
+  epoch:
+    duration_s: 10.0
+    overlap: 0.5
+  families:
+    spectral: true
+    complexity: false
+    connectivity: false
+    graph: false
+
+# Ablation: complexity features only.
+complexity_only:
+  families:
+    spectral: false
+    complexity: true
+    connectivity: false
+    graph: false
+
+# Ablation: connectivity features only (without graph descriptors).
+connectivity_only:
+  families:
+    spectral: false
+    complexity: false
+    connectivity: true
+    graph: false
+
+# Ablation: connectivity + graph descriptors.
+connectivity_graph:
+  families:
+    spectral: false
+    complexity: false
+    connectivity: true
+    graph: true

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eeg_benchml"
+version = "0.1.0"
+description = "Leakage-safe empirical benchmark for EEG-based dementia classification."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Anonymous Authors" }]
+keywords = [
+    "EEG",
+    "dementia",
+    "machine learning",
+    "benchmark",
+    "leave-one-subject-out",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "mne>=1.5",
+    "mne-icalabel>=0.6",
+    "PyWavelets>=1.4",
+    "networkx>=3.1",
+    "matplotlib>=3.7",
+    "omegaconf>=2.3",
+    "tqdm>=4.65",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.5",
+    "black>=24.0",
+    "mypy>=1.6",
+]
+
+[project.scripts]
+eeg-benchml-run = "scripts.run_experiment:main"
+eeg-benchml-staged = "scripts.run_staged_benchmark:main"
+eeg-benchml-interpret = "scripts.run_interpretation:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
