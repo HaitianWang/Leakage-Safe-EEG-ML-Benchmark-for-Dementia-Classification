@@ -35,7 +35,11 @@ from .evaluation import (
     compute_subject_level_metrics,
 )
 from .evaluation.loso import LOSOConfig, LOSOEvaluator
-from .evaluation.uncertainty import metric_accuracy
+from .evaluation.uncertainty import (
+    metric_accuracy,
+    metric_auc_binary,
+    metric_auc_ovr,
+)
 from .features import FeatureExtractorConfig
 from .features.complexity import ComplexityConfig
 from .features.connectivity import ConnectivityConfig
@@ -281,26 +285,71 @@ def run_pipeline(cfg: DictConfig) -> PipelineArtefacts:
         subject_epoch_arrays=subject_epoch_arrays, sfreq=sfreq
     )
 
+    # Realign the subject-level probability matrix with ``y_true_subject``
+    # so the AUC bootstrap operates on matched rows.
+    ordered_subjects = sorted(result.subject_probabilities)
+    probability_matrix = np.array(
+        [result.subject_probabilities[sid] for sid in ordered_subjects]
+    )
+    subject_to_truth = {
+        sid: lbl for sid, lbl in zip(
+            sorted(subject_epoch_arrays.keys()), result.y_true_subject
+        )
+    }
+    aligned_truth = np.array([subject_to_truth[sid] for sid in ordered_subjects])
+    aligned_pred = np.array(
+        [
+            result.y_pred_subject[
+                sorted(subject_epoch_arrays.keys()).index(sid)
+            ]
+            for sid in ordered_subjects
+        ]
+    )
+
     metrics = compute_subject_level_metrics(
-        y_true=result.y_true_subject,
-        y_pred=result.y_pred_subject,
-        mean_probabilities=np.array([
-            result.subject_probabilities[sid]
-            for sid in sorted(result.subject_probabilities)
-        ]),
+        y_true=aligned_truth.tolist(),
+        y_pred=aligned_pred.tolist(),
+        mean_probabilities=probability_matrix,
         classes=classes,
     )
 
-    # Bootstrap CI on accuracy.
-    ci_lo, ci_hi = bootstrap_confidence_interval(
+    # Bootstrap CIs on subject-level accuracy AND AUC, matching Table 3.
+    n_resamples = int(cfg.evaluation.uncertainty.bootstrap_resamples)
+    confidence_level = float(cfg.evaluation.uncertainty.confidence_level)
+    seed = int(cfg.experiment.seed)
+
+    acc_lo, acc_hi = bootstrap_confidence_interval(
         metric_fn=metric_accuracy,
-        y_true=np.array(result.y_true_subject),
-        y_pred=np.array(result.y_pred_subject),
-        n_resamples=int(cfg.evaluation.uncertainty.bootstrap_resamples),
-        confidence_level=float(cfg.evaluation.uncertainty.confidence_level),
-        random_state=int(cfg.experiment.seed),
+        y_true=aligned_truth,
+        y_pred=aligned_pred,
+        n_resamples=n_resamples,
+        confidence_level=confidence_level,
+        random_state=seed,
     )
-    uncertainty: Dict[str, Tuple[float, float]] = {"accuracy_ci_95": (ci_lo, ci_hi)}
+    if len(classes) == 2:
+        positive_label = classes[0]
+        positive_idx = classes.index(positive_label)
+        auc_lo, auc_hi = bootstrap_confidence_interval(
+            metric_fn=metric_auc_binary(positive_label),
+            y_true=aligned_truth,
+            y_pred=probability_matrix[:, positive_idx],
+            n_resamples=n_resamples,
+            confidence_level=confidence_level,
+            random_state=seed,
+        )
+    else:
+        auc_lo, auc_hi = bootstrap_confidence_interval(
+            metric_fn=metric_auc_ovr(classes),
+            y_true=aligned_truth,
+            y_pred=probability_matrix,
+            n_resamples=n_resamples,
+            confidence_level=confidence_level,
+            random_state=seed,
+        )
+    uncertainty: Dict[str, Tuple[float, float]] = {
+        "accuracy_ci_95": (acc_lo, acc_hi),
+        "auc_ci_95": (auc_lo, auc_hi),
+    }
 
     artefacts = PipelineArtefacts(
         config=OmegaConf.to_container(cfg, resolve=True),

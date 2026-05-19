@@ -1,14 +1,25 @@
 """Time-domain complexity features.
 
-For each channel and epoch, this module produces a compact 25-dimensional
-descriptor (Section 4.3.2 of the manuscript):
+For each channel and epoch, this module produces a compact **25-dimensional**
+descriptor (Section 4.3.2 of the manuscript) computed from both broadband and
+band-limited epochs:
 
-* Hjorth activity (log), mobility, and complexity.
-* Zero-crossing rate.
-* Sample entropy (Equation 4 of the manuscript).
-* Higuchi fractal dimension with :math:`k_{\\max} = 8`.
-* Multi-scale entropy at scales :math:`\\{1, 2, 3, 4, 5\\}` (kept as a compact
-  summary by averaging across scales when needed downstream).
+* **Broadband descriptors (10)**: Hjorth activity (log), Hjorth mobility,
+  Hjorth complexity, sample entropy, Higuchi fractal dimension, and
+  multi-scale sample entropy at scales :math:`\\{1, 2, 3, 4, 5\\}`.
+* **Band-limited descriptors (15)**: Hjorth mobility, Hjorth complexity, and
+  sample entropy computed on each of the five clinical EEG bands (delta,
+  theta, alpha, beta, low-gamma) for :math:`5 \\times 3 = 15` additional
+  features.
+
+With 19 channels of the 10--20 montage this yields :math:`25 \\times 19 = 475`
+complexity features, matching the ``Dim.`` column for the
+``Complexity`` and ``Spectral + complexity`` ablation rows in Table 2.
+
+Sample entropy is parameterised with embedding dimension :math:`m = 2` and
+tolerance :math:`r = 0.2 \\sigma`, where :math:`\\sigma` is the standard
+deviation of the analysed segment (Equation 4 of the manuscript). Higuchi
+fractal dimension uses :math:`k_{\\max} = 8`.
 
 The implementations below favour clarity over raw speed; they rely solely on
 NumPy / SciPy and are deterministic given a fixed input.
@@ -20,8 +31,13 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 import numpy as np
+from scipy import signal as sp_signal
 
-from ..constants import CHANNELS_10_20
+from ..constants import BAND_ORDER, BANDS, CHANNELS_10_20
+
+# Bands used for the band-limited complexity descriptors. Following the
+# manuscript, we include all five canonical EEG bands.
+_BAND_LIMITED_KEYS: Tuple[str, ...] = BAND_ORDER
 
 
 @dataclass
@@ -34,8 +50,17 @@ class ComplexityConfig:
     multi_scale_entropy_scales: Tuple[int, ...] = (1, 2, 3, 4, 5)
 
 
+# ---------------------------------------------------------------------------
+# Primitive feature implementations (per-channel, per-epoch).
+# ---------------------------------------------------------------------------
 def _hjorth(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Hjorth activity, mobility, and complexity per epoch and channel."""
+    """Hjorth activity, mobility, and complexity per epoch and channel.
+
+    Activity is the variance of the signal; mobility is
+    :math:`\\sqrt{\\mathrm{Var}(\\dot{x}) / \\mathrm{Var}(x)}`; complexity is
+    the ratio between the mobility of :math:`\\dot{x}` and the mobility of
+    :math:`x` (Section 4.3.2 of the manuscript).
+    """
     eps = 1e-12
     diff1 = np.diff(data, axis=-1)
     diff2 = np.diff(diff1, axis=-1)
@@ -50,15 +75,8 @@ def _hjorth(data: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return activity, mobility, complexity
 
 
-def _zero_crossing_rate(data: np.ndarray) -> np.ndarray:
-    """Number of sign changes per sample, per epoch and channel."""
-    centred = data - data.mean(axis=-1, keepdims=True)
-    signs = np.sign(centred)
-    return (np.diff(signs, axis=-1) != 0).mean(axis=-1)
-
-
 def _sample_entropy_1d(signal: np.ndarray, m: int, r_abs: float) -> float:
-    """Sample entropy for a 1-D signal (used inside per-channel loops)."""
+    """Sample entropy for a 1-D signal (Equation 4 of the manuscript)."""
     n = signal.shape[0]
     if n <= m + 1:
         return 0.0
@@ -80,7 +98,7 @@ def _sample_entropy_1d(signal: np.ndarray, m: int, r_abs: float) -> float:
 def _multiscale_entropy_1d(
     signal: np.ndarray, scales: Tuple[int, ...], m: int, r_abs: float
 ) -> np.ndarray:
-    """Compact multi-scale sample-entropy vector."""
+    """Compact multi-scale sample-entropy vector across the requested scales."""
     out = np.zeros(len(scales), dtype=float)
     for idx, scale in enumerate(scales):
         if scale == 1:
@@ -96,7 +114,7 @@ def _multiscale_entropy_1d(
 
 
 def _higuchi_fractal_dimension(signal: np.ndarray, kmax: int) -> float:
-    """Higuchi fractal dimension of a 1-D signal."""
+    """Higuchi fractal dimension with cap :math:`k_{\\max}`."""
     n = signal.shape[0]
     if n < 2 * kmax:
         return 0.0
@@ -118,79 +136,143 @@ def _higuchi_fractal_dimension(signal: np.ndarray, kmax: int) -> float:
     return float(-slope)
 
 
+def _band_filter(
+    data: np.ndarray, sfreq: float, low: float, high: float
+) -> np.ndarray:
+    """Apply a zero-phase Butterworth band-pass to a batch of epochs."""
+    nyq = 0.5 * sfreq
+    low_n = max(low / nyq, 1e-4)
+    high_n = min(high / nyq, 0.999)
+    if low_n >= high_n:
+        return data
+    sos = sp_signal.butter(N=4, Wn=(low_n, high_n), btype="bandpass", output="sos")
+    return sp_signal.sosfiltfilt(sos, data, axis=-1)
+
+
+# ---------------------------------------------------------------------------
+# Composite feature extractor.
+# ---------------------------------------------------------------------------
 def compute_complexity_features(
-    data: np.ndarray, config: ComplexityConfig
+    data: np.ndarray,
+    config: ComplexityConfig,
+    sfreq: float = 250.0,
 ) -> Tuple[np.ndarray, List[str]]:
-    """Compute the per-channel complexity descriptor for a batch of epochs.
+    """Compute the per-channel 25-dimensional complexity descriptor.
 
     Parameters
     ----------
     data : ndarray of shape ``(n_epochs, n_channels, n_times)``
+        Preprocessed EEG epochs.
     config : ComplexityConfig
+        Complexity feature configuration (Section 4.3.2 of the manuscript).
+    sfreq : float
+        Sampling frequency, required by the band-pass filters for the
+        band-limited Hjorth and sample-entropy descriptors.
 
     Returns
     -------
-    features : ndarray of shape ``(n_epochs, n_features)``
+    features : ndarray of shape ``(n_epochs, 25 * n_channels)``
     feature_names : list[str]
+        Column names with the prefix ``cmpl_<channel>_<descriptor>[_<band>]``,
+        so that downstream interpretation can recover both the channel and
+        the optional band.
     """
     n_epochs, n_channels, _ = data.shape
     feature_names: List[str] = []
+    blocks: List[np.ndarray] = []
 
+    # ------------------------------------------------------------------
+    # Block 1: broadband descriptors (10 features per channel).
+    # ------------------------------------------------------------------
     activity, mobility, complexity = _hjorth(data)
-    zcr = _zero_crossing_rate(data)
+    blocks.extend([np.log10(activity + 1e-12), mobility, complexity])
+    for descriptor in ("hjorth_log_activity", "hjorth_mobility", "hjorth_complexity"):
+        feature_names.extend([f"cmpl_{ch}_{descriptor}" for ch in CHANNELS_10_20])
 
     sample_entropy = np.zeros((n_epochs, n_channels), dtype=float)
-    fractal_dim = np.zeros((n_epochs, n_channels), dtype=float)
+    higuchi = np.zeros((n_epochs, n_channels), dtype=float)
     mse = np.zeros(
         (n_epochs, n_channels, len(config.multi_scale_entropy_scales)),
         dtype=float,
     )
-
     for i in range(n_epochs):
         epoch_std = data[i].std(axis=-1, keepdims=True)
         for c in range(n_channels):
-            signal = data[i, c]
             r_abs = float(config.sample_entropy_r * (epoch_std[c, 0] + 1e-12))
             sample_entropy[i, c] = _sample_entropy_1d(
-                signal, m=config.sample_entropy_m, r_abs=r_abs
+                data[i, c], m=config.sample_entropy_m, r_abs=r_abs
             )
-            fractal_dim[i, c] = _higuchi_fractal_dimension(
-                signal, kmax=config.higuchi_kmax
+            higuchi[i, c] = _higuchi_fractal_dimension(
+                data[i, c], kmax=config.higuchi_kmax
             )
             mse[i, c, :] = _multiscale_entropy_1d(
-                signal,
+                data[i, c],
                 scales=tuple(config.multi_scale_entropy_scales),
                 m=config.sample_entropy_m,
                 r_abs=r_abs,
             )
 
-    blocks = [
-        np.log10(activity + 1e-12),
-        mobility,
-        complexity,
-        zcr,
-        sample_entropy,
-        fractal_dim,
-    ]
-    base_names = [
-        "hjorth_log_activity",
-        "hjorth_mobility",
-        "hjorth_complexity",
-        "zero_crossing_rate",
-        "sample_entropy",
-        "higuchi_fd",
-    ]
-    for name in base_names:
-        feature_names.extend([f"cmpl_{ch}_{name}" for ch in CHANNELS_10_20])
-
+    blocks.append(sample_entropy)
+    feature_names.extend([f"cmpl_{ch}_sample_entropy" for ch in CHANNELS_10_20])
+    blocks.append(higuchi)
+    feature_names.extend([f"cmpl_{ch}_higuchi_fd" for ch in CHANNELS_10_20])
     for scale_idx, scale in enumerate(config.multi_scale_entropy_scales):
         blocks.append(mse[..., scale_idx])
         feature_names.extend(
             [f"cmpl_{ch}_mse_scale{scale}" for ch in CHANNELS_10_20]
         )
 
+    # ------------------------------------------------------------------
+    # Block 2: band-limited descriptors (15 features per channel).
+    #
+    # For each of the five clinical EEG bands we re-compute Hjorth mobility,
+    # Hjorth complexity, and sample entropy on the band-limited signal. This
+    # gives ``5 bands x 3 descriptors = 15`` additional descriptors per
+    # channel, matching the manuscript's "compact 25-dimensional descriptor
+    # set per channel from broadband and selected band-limited epochs".
+    # ------------------------------------------------------------------
+    for band in _BAND_LIMITED_KEYS:
+        low, high = BANDS[band]
+        band_data = _band_filter(data, sfreq=sfreq, low=low, high=high)
+        _, band_mobility, band_complexity = _hjorth(band_data)
+        blocks.append(band_mobility)
+        feature_names.extend(
+            [f"cmpl_{ch}_hjorth_mobility_{band}" for ch in CHANNELS_10_20]
+        )
+        blocks.append(band_complexity)
+        feature_names.extend(
+            [f"cmpl_{ch}_hjorth_complexity_{band}" for ch in CHANNELS_10_20]
+        )
+
+        band_sampen = np.zeros((n_epochs, n_channels), dtype=float)
+        for i in range(n_epochs):
+            band_std = band_data[i].std(axis=-1, keepdims=True)
+            for c in range(n_channels):
+                r_abs = float(
+                    config.sample_entropy_r * (band_std[c, 0] + 1e-12)
+                )
+                band_sampen[i, c] = _sample_entropy_1d(
+                    band_data[i, c],
+                    m=config.sample_entropy_m,
+                    r_abs=r_abs,
+                )
+        blocks.append(band_sampen)
+        feature_names.extend(
+            [f"cmpl_{ch}_sample_entropy_{band}" for ch in CHANNELS_10_20]
+        )
+
     feature_matrix = np.concatenate(
         [block.reshape(n_epochs, -1) for block in blocks], axis=-1
     )
     feature_matrix = np.nan_to_num(feature_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Sanity check: the descriptor count must match the manuscript's 25 per
+    # channel reporting.
+    expected = 25 * n_channels
+    if feature_matrix.shape[1] != expected:
+        raise RuntimeError(
+            f"Complexity feature dimensionality mismatch: produced "
+            f"{feature_matrix.shape[1]} columns, expected {expected} "
+            f"(25 descriptors per channel x {n_channels} channels)."
+        )
     return feature_matrix, feature_names

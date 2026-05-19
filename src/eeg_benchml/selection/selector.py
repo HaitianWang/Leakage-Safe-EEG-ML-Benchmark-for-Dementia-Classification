@@ -1,9 +1,26 @@
 """Leakage-safe feature selection pipeline.
 
-The :class:`LeakageSafeSelector` is the only place in the codebase that fits
-to training data. The pipeline orchestrator forwards the training-fold
-``(X, y)`` here and the resulting transform is applied to test-fold features
-without any peek at test labels.
+The :class:`LeakageSafeSelector` implements the cascade described in
+Section 4.4 of the manuscript. Every step is fitted on training-fold data
+only; no statistic estimated from test subjects is ever used for selection,
+scaling, or hyper-parameter tuning.
+
+Cascade
+-------
+1. **Variance filter**: features with variance below
+   :math:`10^{-6}` are dropped.
+2. **Spearman correlation pruning**: for every pair of features with
+   :math:`|\\rho| > 0.95`, the feature with the smaller mutual-information
+   score with the training labels is dropped.
+3. **Z-score standardisation**: using training-fold mean and standard
+   deviation.
+4. **Primary ranking**: mutual-information top-:math:`k` (default) or
+   :math:`\\ell_1`-regularised logistic regression.
+
+The :meth:`LeakageSafeSelector.transform` method reapplies the fitted cascade
+to a held-out feature matrix using the stored per-column statistics for the
+selected columns only. This keeps the transform numerically identical to the
+training-time selection while remaining trivial to audit.
 """
 
 from __future__ import annotations
@@ -12,11 +29,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Sequence
 
 import numpy as np
-import pandas as pd
 from scipy.stats import spearmanr
 from sklearn.feature_selection import mutual_info_classif
 from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
 
 
 @dataclass
@@ -35,11 +50,18 @@ class FeatureSelectionConfig:
 
 @dataclass
 class FeatureSelectionResult:
-    """Output of :meth:`LeakageSafeSelector.fit`."""
+    """Output of :meth:`LeakageSafeSelector.fit`.
+
+    The selector stores the original-column indices of the retained features
+    together with their per-column mean and scale. This makes the
+    :meth:`LeakageSafeSelector.transform` reduction unambiguous and the
+    fitted state directly inspectable.
+    """
 
     selected_indices: np.ndarray
     selected_names: List[str]
-    scaler: Optional[StandardScaler] = None
+    selected_mean: np.ndarray
+    selected_scale: np.ndarray
 
 
 class LeakageSafeSelector:
@@ -50,7 +72,7 @@ class LeakageSafeSelector:
         self._result: Optional[FeatureSelectionResult] = None
 
     # ------------------------------------------------------------------
-    # Fit / transform API.
+    # Public API.
     # ------------------------------------------------------------------
     def fit(
         self,
@@ -64,7 +86,8 @@ class LeakageSafeSelector:
         Parameters
         ----------
         X : ndarray of shape ``(n_samples, n_features)``
-            Training-fold feature matrix.
+            Training-fold feature matrix. Columns are indexed in the order
+            produced by :class:`~eeg_benchml.features.FeatureExtractor`.
         y : ndarray of shape ``(n_samples,)``
             Training-fold class labels.
         feature_names : sequence of str
@@ -75,7 +98,8 @@ class LeakageSafeSelector:
             :attr:`FeatureSelectionConfig.candidate_k` is used.
         """
         feature_names = list(feature_names)
-        keep_mask = np.ones(X.shape[1], dtype=bool)
+        n_features = X.shape[1]
+        keep_mask = np.ones(n_features, dtype=bool)
 
         # 1. Variance filter.
         variances = X.var(axis=0)
@@ -83,103 +107,91 @@ class LeakageSafeSelector:
 
         # 2. Spearman correlation pruning.
         if keep_mask.sum() > 1:
-            keep_mask = self._prune_correlated(X, y, feature_names, keep_mask)
+            keep_mask = self._prune_correlated(X, y, keep_mask)
 
-        X_red = X[:, keep_mask]
-        kept_names = [name for name, flag in zip(feature_names, keep_mask) if flag]
-
-        # 3. Z-score standardisation.
-        scaler = StandardScaler().fit(X_red)
-        X_scaled = scaler.transform(X_red)
+        # 3. Standardisation on the surviving columns.
+        post_correlation_indices = np.where(keep_mask)[0]
+        X_red = X[:, post_correlation_indices]
+        mean_ = X_red.mean(axis=0)
+        scale_ = X_red.std(axis=0)
+        scale_[scale_ < 1e-12] = 1.0  # protect against constant columns
+        X_scaled = (X_red - mean_) / scale_
 
         # 4. Final ranking.
         if self.config.selector == "none":
-            selected_local = np.arange(X_scaled.shape[1])
+            local_indices = np.arange(X_scaled.shape[1])
         elif self.config.selector == "mutual_information":
             k_to_use = k if k is not None else int(min(self.config.candidate_k))
             k_to_use = min(k_to_use, X_scaled.shape[1])
-            selected_local = self._select_by_mutual_information(
+            local_indices = self._select_by_mutual_information(
                 X_scaled, y, k_to_use
             )
         elif self.config.selector == "l1_logistic":
-            selected_local = self._select_by_l1_logistic(X_scaled, y)
+            local_indices = self._select_by_l1_logistic(X_scaled, y)
         else:
             raise ValueError(
                 f"Unknown feature selector '{self.config.selector}'. "
                 "Expected one of: none, mutual_information, l1_logistic."
             )
 
-        # Translate local indices back to the original feature space.
-        global_indices = np.where(keep_mask)[0][selected_local]
-        selected_names = [kept_names[i] for i in selected_local]
+        # Map local indices (within the post-correlation reduced matrix) back
+        # to the original-column indices, and retain only the corresponding
+        # scaler statistics. This eliminates the position mismatch that
+        # plagues naive implementations and keeps ``transform`` trivial.
+        global_indices = post_correlation_indices[local_indices]
+        selected_mean = mean_[local_indices]
+        selected_scale = scale_[local_indices]
+        selected_names = [feature_names[idx] for idx in global_indices]
+
         self._result = FeatureSelectionResult(
             selected_indices=global_indices,
             selected_names=selected_names,
-            scaler=scaler,
+            selected_mean=selected_mean,
+            selected_scale=selected_scale,
         )
         return self._result
 
     def transform(self, X: np.ndarray) -> np.ndarray:
-        """Apply the fitted cascade to a held-out feature matrix."""
+        """Apply the fitted cascade to a held-out feature matrix.
+
+        Parameters
+        ----------
+        X : ndarray of shape ``(n_samples, n_features)``
+            Feature matrix in the same column order as the training fold.
+
+        Returns
+        -------
+        X_selected : ndarray of shape ``(n_samples, len(selected_indices))``
+            Z-scored values for the selected columns.
+        """
         if self._result is None:
             raise RuntimeError("LeakageSafeSelector.fit must be called first.")
-        # Mirror the order of operations: variance + correlation are encoded
-        # implicitly by ``selected_indices``, but z-scoring needs to reuse the
-        # training-fold StandardScaler.
-        scaler = self._result.scaler
-        if scaler is None:
-            return X[:, self._result.selected_indices]
-        # We have to scale the *original* selected columns; for that we need
-        # to recover the post-correlation matrix. The selected indices already
-        # point at the original columns, and the scaler was fitted on those
-        # same columns in their post-correlation order.
-        X_red = X[:, self._result.selected_indices]
-        # The scaler holds statistics for all kept columns (after variance /
-        # correlation pruning). To remain robust we re-compute statistics for
-        # the chosen subset by indexing into the original scaler.
-        return self._apply_scaler_to_subset(X_red)
+        X_selected = X[:, self._result.selected_indices]
+        return (X_selected - self._result.selected_mean) / self._result.selected_scale
 
     # ------------------------------------------------------------------
     # Internal helpers.
     # ------------------------------------------------------------------
-    def _apply_scaler_to_subset(self, X_red: np.ndarray) -> np.ndarray:
-        """Scale ``X_red`` using the per-column statistics stored in the scaler.
-
-        Notes
-        -----
-        ``self._result.selected_indices`` references the original column order
-        of the input matrix, whereas the fitted :class:`StandardScaler`
-        operates on the post-correlation reduced matrix. We therefore
-        recompute z-scaling per column using the scaler's stored mean / scale
-        arrays, indexed by the relative position of each retained column.
-        """
-        assert self._result is not None and self._result.scaler is not None
-        scaler = self._result.scaler
-        return (X_red - scaler.mean_[: X_red.shape[1]]) / (
-            scaler.scale_[: X_red.shape[1]] + 1e-12
-        )
-
     def _prune_correlated(
         self,
         X: np.ndarray,
         y: np.ndarray,
-        feature_names: Sequence[str],
         keep_mask: np.ndarray,
     ) -> np.ndarray:
-        """Remove features whose absolute Spearman correlation exceeds the threshold.
+        """Drop features whose absolute Spearman correlation exceeds the threshold.
 
-        The feature with the larger mutual-information score with the labels is
-        retained, breaking ties using the original column order.
+        For every pair of correlated columns we retain the one with the
+        larger mutual-information score with the training labels, matching
+        the policy in Section 4.4 of the manuscript.
         """
         active_indices = np.where(keep_mask)[0]
         if active_indices.size < 2:
             return keep_mask
         X_active = X[:, active_indices]
-        # spearmanr handles ties internally; we only care about magnitudes.
         rho, _ = spearmanr(X_active, axis=0)
-        rho = np.atleast_2d(np.abs(np.array(rho)))
+        rho = np.atleast_2d(np.abs(np.asarray(rho)))
         if rho.shape != (X_active.shape[1], X_active.shape[1]):
-            # When only two columns survive, spearmanr returns a scalar.
+            # ``spearmanr`` returns a scalar for two columns.
             rho = np.array([[1.0, float(rho)], [float(rho), 1.0]])
 
         mi_scores = mutual_info_classif(
@@ -205,8 +217,6 @@ class LeakageSafeSelector:
 
         new_keep_mask = keep_mask.copy()
         new_keep_mask[active_indices[drop_mask]] = False
-        # Unused but kept for symmetry with future caller diagnostics.
-        del feature_names
         return new_keep_mask
 
     def _select_by_mutual_information(
@@ -223,11 +233,13 @@ class LeakageSafeSelector:
         return order[:k]
 
     def _select_by_l1_logistic(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """Select non-zero columns from an ``l1``-regularised logistic regression.
+        """Select the non-zero columns of an ``l1``-regularised logistic regression.
 
-        The smallest ``C`` from :attr:`FeatureSelectionConfig.candidate_C` that
-        keeps at least one feature per class is used. Higher ``C`` values are
-        evaluated by the outer inner-cv loop in the pipeline orchestrator.
+        We iterate through ``candidate_C`` from large to small and return the
+        first sparse solution that retains at least one feature. The outer
+        LOSO orchestrator can wrap this routine in an inner GroupKFold loop
+        to choose ``C`` directly, but the simple heuristic is sufficient when
+        only one ``C`` is provided.
         """
         for c_value in sorted(self.config.candidate_C, reverse=True):
             model = LogisticRegression(
@@ -242,7 +254,6 @@ class LeakageSafeSelector:
             nonzero = np.where(coefs > 0)[0]
             if nonzero.size > 0:
                 return nonzero
-        # Fallback: keep all columns.
         return np.arange(X.shape[1])
 
     @property
@@ -253,6 +264,5 @@ class LeakageSafeSelector:
         return self._result
 
 
-# Convenience alias for legacy imports.
+# Convenience alias retained for legacy imports.
 SubjectStratifiedSelector = LeakageSafeSelector
-_ = pd  # silence linter: pandas is imported for downstream notebooks

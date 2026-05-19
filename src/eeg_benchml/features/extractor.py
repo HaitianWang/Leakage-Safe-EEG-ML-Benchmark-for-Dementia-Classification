@@ -99,7 +99,7 @@ class FeatureExtractor:
 
         if self.config.families.get("complexity", False):
             feats, names = compute_complexity_features(
-                data=data, config=self.config.complexity
+                data=data, config=self.config.complexity, sfreq=sfreq
             )
             family_indices["complexity"] = slice(cursor, cursor + feats.shape[1])
             cursor += feats.shape[1]

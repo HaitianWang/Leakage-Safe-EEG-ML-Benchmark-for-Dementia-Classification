@@ -3,13 +3,14 @@
 The aggregation logic uses the structured feature-name prefix produced by the
 extractor:
 
-* ``spec_<channel>_<descriptor>_<band>?``
-* ``cmpl_<channel>_<descriptor>``
+* ``spec_<channel>_<descriptor>[_<band>]``
+* ``cmpl_<channel>_<descriptor>[_<band>]``
 * ``conn_wpli_<band>_<channel-pair>``
+* ``graph_wpli_<band>_<regionA>-<regionB>``
 * ``graph_<descriptor>_<band>``
 
-When the prefix does not encode a band or channel, that feature is skipped in
-the corresponding aggregation.
+When the name does not encode a band, channel, or region, the feature is
+silently skipped in the corresponding aggregation.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import numpy as np
 
 from ..constants import BAND_ORDER, CHANNEL_TO_REGION, CHANNELS_10_20, REGIONS
 from ..features.extractor import feature_family_of
+
+_REGION_NAMES = frozenset(REGIONS.keys())
 
 
 def _channels_in_name(name: str) -> Sequence[str]:
@@ -39,6 +42,22 @@ def _channels_in_name(name: str) -> Sequence[str]:
             return tuple(pair_token.split("-"))
         return ()
     return ()
+
+
+def _regions_in_name(name: str) -> Sequence[str]:
+    """Return the anatomical region(s) referenced by a graph feature name.
+
+    Graph between-region wPLI features encode region names directly. Global
+    graph descriptors (mean strength, clustering, ...) do not reference a
+    region; the function returns an empty tuple for them.
+    """
+    if not name.startswith("graph_"):
+        return ()
+    last_token = name.split("_")[-1]
+    if "-" not in last_token:
+        return ()
+    parts = last_token.split("-")
+    return tuple(part for part in parts if part in _REGION_NAMES)
 
 
 def _band_in_name(name: str) -> str:
@@ -78,10 +97,10 @@ def aggregate_importance_by_band(
 def aggregate_importance_by_channel(
     feature_names: Iterable[str], importance: np.ndarray
 ) -> Dict[str, float]:
-    """Sum permutation importance scores per channel.
+    """Sum permutation importance scores per EEG channel.
 
     For connectivity features, the importance is split evenly between the
-    two channels involved in the pair.
+    two channels participating in the pair.
     """
     channel_totals: Dict[str, float] = defaultdict(float)
     for name, value in zip(feature_names, importance):
@@ -98,18 +117,25 @@ def aggregate_importance_by_channel(
 def aggregate_importance_by_region(
     feature_names: Iterable[str], importance: np.ndarray
 ) -> Dict[str, float]:
-    """Sum permutation importance per anatomical region."""
-    region_totals: Dict[str, float] = defaultdict(float)
+    """Sum permutation importance per anatomical region.
+
+    Spectral, complexity, and channel-pair connectivity features contribute
+    through their channel(s); region names embedded in graph feature names
+    contribute directly.
+    """
+    region_totals: Dict[str, float] = {region: 0.0 for region in REGIONS}
     for name, value in zip(feature_names, importance):
         channels = _channels_in_name(name)
-        if not channels:
+        if channels:
+            share = float(value) / max(1, len(channels))
+            for channel in channels:
+                region = CHANNEL_TO_REGION.get(channel)
+                if region:
+                    region_totals[region] += share
             continue
-        share = float(value) / max(1, len(channels))
-        for channel in channels:
-            region = CHANNEL_TO_REGION.get(channel)
-            if region:
+        regions = _regions_in_name(name)
+        if regions:
+            share = float(value) / max(1, len(regions))
+            for region in regions:
                 region_totals[region] += share
-    # Ensure every region appears in the output for downstream plotting.
-    for region in REGIONS:
-        region_totals.setdefault(region, 0.0)
-    return dict(region_totals)
+    return region_totals

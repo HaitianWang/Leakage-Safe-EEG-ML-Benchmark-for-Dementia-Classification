@@ -44,15 +44,36 @@ def _stage_a_preprocessing() -> List[Dict[str, str]]:
     ]
 
 
-def _stage_b_epoch_aug() -> List[Dict[str, str]]:
-    # Epoch-length ablations are encoded via base overrides instead of new
-    # variants to keep the YAML tree compact.
+def _stage_b_epoch_aug() -> List[Dict[str, object]]:
+    """Stage B variants: epoch length + augmentation controls.
+
+    The control rows (marked with a "ctrl_" prefix) correspond to the
+    "Aug. ctrl." rows in Table 2 of the manuscript. They are designed to
+    separate the effect of augmentation from the SVM regularisation grid by
+    keeping the epoch length fixed at 10 s and varying only one factor at a
+    time:
+
+    * ``ctrl_no_aug_wide_grid``: no augmentation, but the SVM regularisation
+      grid is widened to ``C in {0.001, 0.01, 0.1, 1, 10, 100}``.
+    * ``ctrl_gauss_only``: Gaussian-noise augmentation only.
+    * ``ctrl_scale_only``: amplitude-scaling augmentation only.
+    """
     return [
-        {"label": "10s_no_aug", "epoch_s": 10.0, "augment": False},
-        {"label": "5s_no_aug",  "epoch_s": 5.0,  "augment": False},
-        {"label": "20s_no_aug", "epoch_s": 20.0, "augment": False},
-        {"label": "30s_no_aug", "epoch_s": 30.0, "augment": False},
-        {"label": "10s_aug",    "epoch_s": 10.0, "augment": True},
+        {"label": "10s_no_aug", "epoch_s": 10.0, "augment": True, "amp": False, "noise": False},
+        {"label": "5s_no_aug",  "epoch_s": 5.0,  "augment": True, "amp": False, "noise": False},
+        {"label": "20s_no_aug", "epoch_s": 20.0, "augment": True, "amp": False, "noise": False},
+        {"label": "30s_no_aug", "epoch_s": 30.0, "augment": True, "amp": False, "noise": False},
+        {
+            "label": "ctrl_no_aug_wide_grid",
+            "epoch_s": 10.0,
+            "augment": False,
+            "amp": False,
+            "noise": False,
+            "extra": ("classifier.params.C_grid=[0.001,0.01,0.1,1,10,100]",),
+        },
+        {"label": "ctrl_gauss_only", "epoch_s": 10.0, "augment": True, "amp": False, "noise": True},
+        {"label": "ctrl_scale_only", "epoch_s": 10.0, "augment": True, "amp": True,  "noise": False},
+        {"label": "10s_aug",    "epoch_s": 10.0, "augment": True, "amp": True,  "noise": True},
     ]
 
 
@@ -121,8 +142,18 @@ def main() -> None:
     for entry in _stage_b_epoch_aug():
         overrides = list(extra_overrides) + [
             f"features.epoch.duration_s={entry['epoch_s']}",
-            f"features.augmentation.enabled={'true' if entry['augment'] else 'false'}",
+            f"features.augmentation.enabled={'true' if entry.get('augment', True) else 'false'}",
         ]
+        # Augmentation controls: switch off one of the two augmentation
+        # components by zeroing out its strength while keeping the
+        # augmentation step itself enabled.
+        if entry.get("augment", False):
+            if not entry.get("amp", True):
+                overrides.append("features.augmentation.amplitude_scaling=[1.0,1.0]")
+            if not entry.get("noise", True):
+                overrides.append("features.augmentation.gaussian_noise_sigma=0.0")
+        for extra in entry.get("extra", ()):  # type: ignore[arg-type]
+            overrides.append(str(extra))
         metrics = _run_with_overrides(
             label=f"B_{entry['label']}",
             overrides_kv=overrides,
