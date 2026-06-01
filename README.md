@@ -269,21 +269,6 @@ the dataset.
 
 ---
 
-## 9. Citation
-
-If you use this code, please cite the accompanying manuscript:
-
-```bibtex
-@inproceedings{eeg_benchml_dementia,
-  title     = {Empirical Evaluation of EEG-Based Machine Learning Pipelines
-               for Dementia Classification},
-  booktitle = {(under review)},
-  year      = {2025}
-}
-```
-
----
-
-## 10. License
+## 9. License
 
 Released under the MIT License — see [`LICENSE`](LICENSE).
